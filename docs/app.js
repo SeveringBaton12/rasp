@@ -10,10 +10,14 @@ const DAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб']
 const DAYS_FULL = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота']
 const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
 const STALE_AFTER_HOURS = 30
+// The university's bell schedule; a lesson's own times win when it has them
+const PAIRS = { 1: ['08:30', '10:05'], 2: ['10:25', '12:00'], 3: ['12:30', '14:05'], 4: ['14:20', '15:55'], 5: ['16:05', '17:40'], 6: ['17:50', '19:25'], 7: ['19:35', '21:10'] }
+// Pairs shown even when the week has nothing that late
+const MIN_PAIRS = 4
 
 const ICONS = {
   star: '<svg viewBox="0 0 24 24"><path d="m12 3.5 2.7 5.5 6 .9-4.4 4.2 1 6-5.3-2.8-5.3 2.8 1-6L3.3 9.9l6-.9z"/></svg>',
-  cal: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M12 13v5M9.5 15.5h5"/></svg>',
+  home: '<svg viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/></svg>',
   left: '<svg viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></svg>',
   right: '<svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg>',
 }
@@ -215,7 +219,7 @@ function renderHome(tab) {
       <p>${
         saved
           ? `Ваше расписание: ${link(mine.kind, mine.id, saved.name)}. Оно открывается сразу при входе на сайт.`
-          : 'Найдите свою группу и нажмите «Моя группа» — сайт запомнит её и будет открывать сразу.'
+          : 'Нажмите на свою группу в списке ниже или напишите её название в строке поиска сверху. На странице группы нажмите «Запомнить как мою группу» — и в следующий раз сайт сразу откроет ваше расписание.'
       }</p>
     </div>
     <div class="tabs" role="tablist">${tabs
@@ -256,8 +260,7 @@ function lessonHtml(kind, lesson, state) {
   }
   const sub = kind !== 'r' && lesson.sub ? ` <em>· ${esc(kind === 'g' ? 'подгруппа ' + lesson.sub.split('-').pop() : lesson.sub)}</em>` : ''
   return `<div class="lesson t-${esc(lesson.type)} ${state}">
-    <div class="time"><b>${lesson.s}</b>${lesson.e}</div>
-    <div><div class="subj">${esc(lesson.subj)}</div><div class="kind">${esc(lesson.label)}${sub}</div><div class="who">${who}</div></div>
+    <div class="subj">${esc(lesson.subj)}</div><div class="kind">${esc(lesson.label)}${sub}</div><div class="who">${who}</div>
   </div>`
 }
 
@@ -291,43 +294,11 @@ function nowCard(kind, lessons) {
   return `<div class="nowcard ${current.length ? 'live' : ''}">${html}</div>`
 }
 
-function download(name, data) {
-  const now = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z'
-  const text = value => String(value).replace(/[\\;,]/g, c => '\\' + c).replace(/\n/g, '\\n')
-  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//rasp-bru//RU', 'CALSCALE:GREGORIAN', `X-WR-CALNAME:${text(name)}`]
-  data.forEach((lesson, i) => {
-    const day = lesson.d.replace(/-/g, '')
-    const who = lesson.teacher ?? lesson.sub ?? lesson.groups ?? ''
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:${day}-${lesson.s.replace(':', '')}-${i}@rasp-bru`,
-      `DTSTAMP:${now}`,
-      `DTSTART;TZID=Europe/Minsk:${day}T${lesson.s.replace(':', '')}00`,
-      `DTEND;TZID=Europe/Minsk:${day}T${lesson.e.replace(':', '')}00`,
-      `SUMMARY:${text(lesson.subj)} (${text(lesson.label)})`,
-      `LOCATION:${text(lesson.room ?? '')}`,
-      `DESCRIPTION:${text([lesson.label, Array.isArray(who) ? who.join(', ') : who].filter(Boolean).join('\n'))}`,
-      'END:VEVENT',
-    )
-  })
-  lines.push('END:VCALENDAR')
-  const url = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/calendar' }))
-  const a = Object.assign(document.createElement('a'), { href: url, download: `${name}.ics` })
-  document.body.append(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
-
 function renderSchedule(kind, data, view) {
   const now = minskNow()
   const mine = store.get('my')
   const isMine = mine && mine.kind === kind && mine.id === data.id
-  const subs = kind === 'g' ? data.subs : []
-  let sub = store.get('sub.' + data.id)
-  if (!subs.includes(sub)) sub = null
-  const lessons = data.lessons
-    .filter(l => kind !== 'g' || !l.sub || !sub || l.sub === sub)
+  const lessons = [...data.lessons]
     .sort((a, b) => (a.d + a.s).localeCompare(b.d + b.s) || (a.sub ?? '').localeCompare(b.sub ?? ''))
 
   // Weeks the data covers
@@ -362,27 +333,29 @@ function renderSchedule(kind, data, view) {
   const weekEnd = addDays(view.week, 6)
   const stale = index.synced && (Date.now() - Date.parse(index.synced)) / 3600000 > STALE_AFTER_HOURS
 
-  const dayHtml = ({ date, list }) => {
-    let body = ''
-    let prev = null
-    for (const lesson of list) {
-      if (prev && lesson.n - prev.n > 1) {
-        const n = lesson.n - prev.n - 1
-        body += `<div class="gap">окно · ${n} ${plural(n, 'пара', 'пары', 'пар')}</div>`
-      }
-      const state =
-        date < now.date || (date === now.date && minutes(lesson.e) <= now.minutes)
-          ? 'past'
-          : date === now.date && minutes(lesson.s) <= now.minutes
-            ? 'live'
-            : ''
-      body += lessonHtml(kind, lesson, state)
-      prev = lesson
+  // Every pair of the day has its row, an empty one too, as on the official site
+  const lastPair = Math.max(MIN_PAIRS, ...days.flatMap(day => day.list.map(l => l.n)))
+  const times = {}
+  for (const lesson of lessons) times[lesson.n] ??= [lesson.s, lesson.e]
+  const timeOf = n => times[n] ?? PAIRS[n] ?? ['', '']
+  const pairLabel = n => `<b>${n}</b><span>пара</span><small>${timeOf(n)[0]}<br>${timeOf(n)[1]}</small>`
+
+  let grid = '<div class="corner"></div>'
+  for (let n = 1; n <= lastPair; n++) grid += `<div class="ph" style="grid-row:${n + 1}">${pairLabel(n)}</div>`
+  days.forEach(({ date, list }, i) => {
+    const marks = `${date === now.date ? 'today' : ''} ${date === view.day ? 'sel' : ''}`
+    grid += `<div class="dh ${marks}" style="grid-column:${i + 2}"><b>${DAYS_FULL[weekday(date)]}</b><small>${dayMonth(date)}${date === now.date ? ' · сегодня' : ''}</small></div>`
+    for (let n = 1; n <= lastPair; n++) {
+      const here = list.filter(l => l.n === n)
+      const [start, end] = timeOf(n)
+      const isPast = date < now.date || (date === now.date && end && minutes(end) <= now.minutes)
+      const isLive = date === now.date && start && minutes(start) <= now.minutes && !isPast
+      const body = here.map(l => lessonHtml(kind, l, isPast ? 'past' : isLive ? 'live' : '')).join('')
+      grid += `<div class="cell ${marks} ${here.length ? '' : 'empty'}" style="grid-column:${i + 2};grid-row:${n + 1}">
+        <div class="num">${pairLabel(n)}</div>
+        <div class="stack">${body || '<span class="none">нет пары</span>'}</div></div>`
     }
-    return `<section class="day ${date === now.date ? 'today' : ''} ${date === view.day ? 'sel' : ''}">
-      <h3>${DAYS_FULL[weekday(date)]}<small>${shortDate(date)}</small></h3>
-      ${body || '<div class="free">Занятий нет</div>'}</section>`
-  }
+  })
 
   document.title = `${data.name} — расписание БРУ`
   app.innerHTML = `
@@ -390,24 +363,17 @@ function renderSchedule(kind, data, view) {
     <div class="head">
       <div><h1>${esc(data.name)}</h1><div class="meta">${esc(meta)}</div></div>
       <div class="actions">
-        ${kind !== 'r' ? `<button class="btn ${isMine ? 'on' : ''}" id="mine" aria-pressed="${Boolean(isMine)}">${ICONS.star}<span>${isMine ? 'Моё расписание' : kind === 'g' ? 'Моя группа' : 'Моё расписание'}</span></button>` : ''}
-        <button class="btn" id="ics" title="Скачать файл для календаря">${ICONS.cal}<span class="long">В календарь</span></button>
+        ${kind !== 'r' ? `<button class="btn ${isMine ? 'on' : ''}" id="mine" aria-pressed="${Boolean(isMine)}">${ICONS.star}<span>${isMine ? (kind === 'g' ? 'Это моя группа' : 'Это моё расписание') : kind === 'g' ? 'Запомнить как мою группу' : 'Запомнить как моё расписание'}</span></button>` : ''}
+        <a class="btn" href="#/all">${ICONS.home}<span>На главную</span></a>
       </div>
     </div>
-    ${
-      subs.length
-        ? `<div class="subs"><span>Подгруппа:</span><button data-sub="" aria-pressed="${!sub}">все</button>${subs
-            .map(s => `<button data-sub="${esc(s)}" aria-pressed="${s === sub}">${esc(s.split('-').pop())}</button>`)
-            .join('')}</div>`
-        : ''
-    }
     <div id="now">${nowCard(kind, lessons)}</div>
     <div class="weeknav">
-      <button id="prev" aria-label="Предыдущая неделя" ${at <= 0 ? 'disabled' : ''}>${ICONS.left}</button>
+      <button id="prev" aria-label="Предыдущая неделя" ${at <= 0 ? 'disabled' : ''}>${ICONS.left}<span>Прошлая неделя</span></button>
       <div class="title">${dayMonth(view.week)} – ${dayMonth(weekEnd)}<small>${
         view.week === mondayOf(now.date) ? 'текущая неделя' : view.week === addDays(mondayOf(now.date), 7) ? 'следующая неделя' : data.label && data.form === 'part' ? esc(data.label) : ' '
       }</small></div>
-      <button id="next" aria-label="Следующая неделя" ${at >= weeks.length - 1 ? 'disabled' : ''}>${ICONS.right}</button>
+      <button id="next" aria-label="Следующая неделя" ${at >= weeks.length - 1 ? 'disabled' : ''}><span>Следующая неделя</span>${ICONS.right}</button>
     </div>
     <div class="daystrip" role="tablist">${days
       .map(
@@ -415,7 +381,7 @@ function renderSchedule(kind, data, view) {
           `<button role="tab" data-day="${date}" aria-selected="${date === view.day}" class="${list.length ? 'has' : ''} ${date === now.date ? 'today' : ''}"><span>${DAYS[weekday(date)]}</span><b>${Number(date.slice(8))}</b><i></i></button>`,
       )
       .join('')}</div>
-    <div class="week" style="--days:${days.length}">${days.map(dayHtml).join('')}</div>`
+    <div class="grid" style="--days:${days.length}">${grid}</div>`
 
   const redraw = () => renderSchedule(kind, data, view)
   app.querySelector('#prev').onclick = () => {
@@ -434,20 +400,12 @@ function renderSchedule(kind, data, view) {
       redraw()
     }
   })
-  app.querySelectorAll('[data-sub]').forEach(button => {
-    button.onclick = () => {
-      store.set('sub.' + data.id, button.dataset.sub || null)
-      redraw()
-    }
-  })
   const mineButton = app.querySelector('#mine')
   if (mineButton)
     mineButton.onclick = () => {
       store.set('my', isMine ? null : { kind, id: data.id })
       redraw()
     }
-  app.querySelector('#ics').onclick = () => download(data.name + (sub ? ` (${sub})` : ''), lessons)
-
   clearInterval(timer)
   timer = setInterval(() => {
     const slot = document.getElementById('now')

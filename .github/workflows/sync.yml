@@ -1,0 +1,51 @@
+name: sync
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The data is not kept in git: what the site serves now is the last sync
+      - name: Fetch the data the site serves now
+        run: |
+          mkdir -p docs/data
+          curl -fsS "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/index.json" \
+            -o docs/data/index.json || rm -f docs/data/index.json
+
+      # On a schedule an unchanged source is skipped; a push or a manual run always rebuilds.
+      # A source that parses badly fails here, and the site keeps its last good data.
+      - name: Sync with rasp.bru.by
+        id: sync
+        shell: bash
+        run: |
+          python3 scripts/sync.py ${{ github.event_name != 'schedule' && '--force' || '' }} | tee sync.log
+          if grep -q 'nothing to do' sync.log; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.sync.outputs.changed == 'true'
+        with:
+          path: docs
+
+      - id: deploy
+        if: steps.sync.outputs.changed == 'true'
+        uses: actions/deploy-pages@v4

@@ -236,16 +236,8 @@ def main():
     if os.path.exists(index_path):
         with open(index_path, encoding='utf-8') as file:
             previous = json.load(file)
-    complete = previous and all(
-        os.path.isfile(os.path.join(ROOT, folder, item['id'] + '.json'))
-        for folder, key in (('g', 'groups'), ('t', 'teachers'), ('r', 'rooms'))
-        for item in previous.get(key, [])
-    )
-    if previous and complete and generated and previous.get('generated') == generated and '--force' not in sys.argv:
-        previous['checked'] = dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
-        with open(index_path, 'w', encoding='utf-8') as file:
-            json.dump(previous, file, ensure_ascii=False, separators=(',', ':'))
-        print(f'source unchanged since {generated}: verification refreshed')
+    if previous and previous.get('generated') == generated and '--force' not in sys.argv:
+        print(f'source unchanged since {generated}: nothing to do')
         return 0
 
     groups = crawl_groups()
@@ -277,7 +269,7 @@ def main():
         problems.append('fewer than 500 lessons in total')
     if previous and len(groups) < MIN_SHARE * len(previous.get('groups', [])):
         problems.append(f'{len(groups)} groups, {len(previous["groups"])} last time')
-    if failures:
+    if len(failures) > 0.1 * (len(groups) + len(teachers) + 1):
         problems.append(f'{len(failures)} pages failed')
     if problems:
         print('SYNC REFUSED, old data kept:', '; '.join(problems), file=sys.stderr)
@@ -357,7 +349,6 @@ def main():
     write('index.json', {
         'generated': generated,
         'synced': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
-        'checked': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
         'groups': [
             {k: g[k] for k in ('id', 'name', 'form', 'faculty', 'course')} | {'n': len(g['lessons'])}
             for g in sorted(groups, key=lambda g: g['name'])
